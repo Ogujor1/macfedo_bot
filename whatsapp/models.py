@@ -20,13 +20,11 @@ class Order(models.Model):
         ('delivered', 'Delivered'),
         ('cancelled', 'Cancelled'),
     ]
-
     MATERIAL_CHOICES = [
         ('leather', 'Leather'),
         ('suede', 'Suede'),
         ('nubuck', 'Nubuck'),
     ]
-
     customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
     product = models.CharField(max_length=255)
     material = models.CharField(max_length=50, choices=MATERIAL_CHOICES, blank=True)
@@ -37,6 +35,7 @@ class Order(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     date_ordered = models.DateTimeField(auto_now_add=True)
     notes = models.TextField(blank=True)
+    image_url = models.TextField(blank=True)
 
     def __str__(self):
         return f"Order {self.id} - {self.customer.name} - {self.product}"
@@ -53,8 +52,30 @@ class Conversation(models.Model):
 class Broadcast(models.Model):
     title = models.CharField(max_length=255)
     message = models.TextField()
+    template_name = models.CharField(max_length=100, blank=True)
     sent_to = models.IntegerField(default=0)
     date_sent = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"{self.title} - {self.date_sent}"
+
+
+class MessageLog(models.Model):
+    STATUS_CHOICES = [
+        ('sent', 'Sent'),
+        ('delivered', 'Delivered'),
+        ('read', 'Read'),
+        ('failed', 'Failed'),
+        ('replied', 'Replied'),
+    ]
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
+    message_id = models.CharField(max_length=255, blank=True)
+    broadcast = models.ForeignKey(Broadcast, on_delete=models.SET_NULL, null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='sent')
+    sent_at = models.DateTimeField(auto_now_add=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    replied_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"{self.customer.name} - {self.status} - {self.sent_at.strftime('%d %b %Y')}"
