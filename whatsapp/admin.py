@@ -45,10 +45,23 @@ class CustomerAdmin(admin.ModelAdmin):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ['id', 'customer', 'product', 'material', 'size', 'color', 'status', 'date_ordered', 'show_image']
+    list_display = ['id', 'customer', 'product', 'material', 'size', 'color', 'status', 'date_ordered', 'show_image', 'show_payment_proof']
     search_fields = ['customer__name', 'product']
     list_filter = ['status', 'material']
-    readonly_fields = ['date_ordered', 'show_image']
+    readonly_fields = ['date_ordered', 'show_image', 'show_payment_proof']
+
+    def show_payment_proof(self, obj):
+        notes = obj.notes or ''
+        if 'Payment proof:' in notes:
+            url = notes.split('Payment proof:')[1].strip().split('|')[0].strip()
+            if url:
+                return format_html(
+                    '<a href="{}" target="_blank">'
+                    '<img src="{}" style="width:80px;height:80px;object-fit:cover;border-radius:4px;border:2px solid green;" />'
+                    '</a>', url, url
+                )
+        return "⏳ Awaiting"
+    show_payment_proof.short_description = 'Payment Proof'
 
     def show_image(self, obj):
         notes = obj.notes or ''

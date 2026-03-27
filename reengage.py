@@ -53,7 +53,7 @@ cutoff = now - timedelta(days=args.days)
 
 if args.days == 7:
     # 7 days: unsubscribed customers
-    customers = Customer.objects.filter(
+    customers = Customer.objects.exclude(tag='unreachable').filter(
         tag='unsubscribed',
         date_added__lte=cutoff
     )
@@ -64,14 +64,14 @@ elif args.days == 14:
     recent_buyers = Order.objects.filter(
         date_ordered__gte=cutoff
     ).values_list('customer_id', flat=True)
-    customers = Customer.objects.filter(
+    customers = Customer.objects.exclude(tag='unreachable').filter(
         is_active=True,
         tag='customer'
     ).exclude(id__in=recent_buyers)
     subject = "14-day win-back"
 elif args.days == 28:
     # 28 days: all inactive customers
-    customers = Customer.objects.filter(
+    customers = Customer.objects.exclude(tag='unreachable').filter(
         is_active=True,
         date_added__lte=cutoff,
         tag__in=['customer', 'enquiry']

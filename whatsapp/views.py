@@ -79,7 +79,7 @@ FAQS = (
     "Type *Hi* to place an order"
 )
 
-def process_message(phone, message, msg_type='text', image_id=None):
+def process_message(phone, message, msg_type='text', image_id=None, image_url=''):
     msg = message.strip() if msg_type == 'text' else ''
     msg_lower = msg.lower()
 
@@ -174,7 +174,24 @@ def process_message(phone, message, msg_type='text', image_id=None):
 
     # IMAGE RECEIVED
     if msg_type == 'image':
+        # Check if this is a payment proof (customer has pending order)
+        pending_orders = Order.objects.filter(customer=customer, status='pending').order_by('-date_ordered')
+        if step == 'start' and pending_orders.exists():
+            # Save payment proof to most recent pending order
+            order = pending_orders.first()
+            order.notes = order.notes + f" | Payment proof: {image_url}"
+            order.status = 'confirmed'
+            order.save()
+            return send_message(phone,
+                "✅ *Payment proof received!*\n\n"
+                f"Order #{order.id} is now being processed.\n\n"
+                "🕒 Our team will verify and process within *1 hour*.\n\n"
+                "We'll notify you once your order is on its way! 🚚\n\n"
+                "_Type *Hi* to place another order_"
+            )
+
         conv.context['image_id'] = image_id or 'received'
+        conv.context['image_url'] = image_url or ''
         conv.step = 'get_size'
         conv.save()
         name = customer.name if customer.name != phone else ''
@@ -287,6 +304,7 @@ def process_message(phone, message, msg_type='text', image_id=None):
         items = conv.context.get('items', [])
         items.append({
             'image_id': conv.context.get('image_id', 'N/A'),
+            'image_url': conv.context.get('image_url', ''),
             'size': conv.context.get('size', ''),
             'material': conv.context.get('material', ''),
             'color': conv.context.get('color', ''),
@@ -393,6 +411,7 @@ def process_message(phone, message, msg_type='text', image_id=None):
                     color=item.get('color', ''),
                     address=ctx.get('address', ''),
                     status='pending',
+                    image_url=item.get('image_url', ''),
                     notes=f"Image: {item.get('image_id','N/A')} | {ctx.get('location','')} | Fee: {ctx.get('delivery_fee','')}"
                 )
                 order_ids.append(str(order.id))
@@ -479,8 +498,19 @@ def webhook(request):
                 if msg_type == 'text':
                     process_message(phone, msg_data['text']['body'], 'text')
                 elif msg_type == 'image':
-                    image_id = msg_data.get('image', {}).get('id', '')
-                    process_message(phone, '', 'image', image_id)
+                    image_data = msg_data.get('image', {})
+                    image_id = image_data.get('id', '')
+                    # Fetch actual image URL from Meta API
+                    try:
+                        img_response = requests.get(
+                            f"https://graph.facebook.com/v18.0/{image_id}",
+                            headers={"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"}
+                        )
+                        img_json = img_response.json()
+                        image_url = img_json.get('url', '')
+                    except:
+                        image_url = ''
+                    process_message(phone, '', 'image', image_id, image_url)
 
             if 'statuses' in value:
                 for status_data in value['statuses']:

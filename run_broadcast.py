@@ -18,6 +18,13 @@ def send_template_message(phone, template_name, customer_name, product="", price
         "Authorization": f"Bearer {settings.WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
     }
+    # Build parameters based on what template expects
+    parameters = [{"type": "text", "text": customer_name}]
+    if product:
+        parameters.append({"type": "text", "text": product})
+    if price:
+        parameters.append({"type": "text", "text": price})
+
     data = {
         "messaging_product": "whatsapp",
         "to": phone,
@@ -28,11 +35,7 @@ def send_template_message(phone, template_name, customer_name, product="", price
             "components": [
                 {
                     "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": customer_name},
-                        {"type": "text", "text": product},
-                        {"type": "text", "text": price}
-                    ]
+                    "parameters": parameters
                 }
             ]
         }
@@ -49,9 +52,9 @@ parser.add_argument('--tag', default='all')
 args = parser.parse_args()
 
 if args.tag == 'all':
-    customers = Customer.objects.filter(is_active=True)
+    customers = Customer.objects.filter(is_active=True).exclude(tag='unreachable')
 else:
-    customers = Customer.objects.filter(is_active=True, tag=args.tag)
+    customers = Customer.objects.filter(is_active=True, tag=args.tag).exclude(tag='unreachable')
 
 total = customers.count()
 sent = 0
