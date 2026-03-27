@@ -5,7 +5,7 @@ from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.utils import timezone
-from .models import Customer, Order, Conversation, MessageLog
+from .models import Customer, Order, Conversation, MessageLog, DiscountCode, DiscountUsage
 from .utils import download_and_save_image
 from django.conf import settings as django_settings
 
@@ -56,6 +56,21 @@ def calc_items_total(items, delivery_fee):
     except:
         return "0.00"
 
+def validate_discount(code_str, customer):
+    from datetime import date
+    try:
+        code = DiscountCode.objects.get(code=code_str.upper(), is_active=True)
+        # Check expiry
+        if date.today() > code.expiry_date:
+            return None, 'Sorry, this code has expired.'
+        # Check customer usage
+        uses = DiscountUsage.objects.filter(customer=customer, code=code).count()
+        if uses >= code.max_uses_per_customer:
+            return None, f'You have already used this code {uses} time(s). Maximum is {code.max_uses_per_customer}.'
+        return code, 'valid'
+    except DiscountCode.DoesNotExist:
+        return None, 'Invalid discount code. Please check and try again.'
+
 def welcome(phone, name=None):
     greeting = f"Welcome back *{name}!*" if name and name != phone else "Welcome to *Macfedo Foot Wears!*"
     return send_message(phone,
@@ -99,6 +114,10 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
 
     conv, _ = Conversation.objects.get_or_create(customer=customer)
     step = conv.step
+
+    # Track last interaction
+    customer.last_interaction = timezone.now()
+    customer.save(update_fields=['last_interaction'])
 
     # GLOBAL COMMANDS
     if msg_type == 'text':
@@ -384,26 +403,11 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
                 f"Browse: {CATALOGUE_LINK}"
             )
         elif msg_lower == '2':
-            conv.step = 'confirm'
+            conv.step = 'get_discount'
             conv.save()
-            ctx = conv.context
-            items = ctx.get('items', [])
-            total = calc_items_total(items, ctx.get('delivery_fee', '0'))
-            conv.context['total'] = total
-            conv.save()
-            summary = ""
-            for i, item in enumerate(items, 1):
-                qty = item.get('quantity', 1)
-                summary += f"*Item {i}:* Size {item['size']} | {item['material']} | {item['color']} | Qty: {qty} | ₦{item['price']} each\n"
             return send_message(phone,
-                f"📋 *Order Summary:*\n\n"
-                f"{summary}\n"
-                f"Delivery: {ctx['location']} — ₦{ctx['delivery_fee']}\n"
-                f"Address: {ctx['address']}\n"
-                f"💳 *TOTAL: ₦{total}*\n\n"
-                "Reply *YES* to confirm ✅\n"
-                "Reply *NO* to cancel ❌\n"
-                "Reply *EDIT* to change details"
+                "🎟️ Do you have a *discount code*?\n\n"
+                "Enter your code or reply *SKIP* to continue without one."
             )
         elif msg_lower == '3':
             conv.step = 'start'
@@ -419,6 +423,79 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             return send_message(phone,
                 "Please reply:\n1 to add another pair\n2 to proceed\n3 for 5+ pairs"
             )
+
+    # GET DISCOUNT CODE
+    elif step == 'get_discount':
+        from datetime import date
+        ctx = conv.context
+        items = ctx.get('items', [])
+        subtotal = calc_items_total(items, ctx.get('delivery_fee', '0'))
+
+        if msg_lower == 'skip':
+            conv.context['discount_code'] = ''
+            conv.context['discount_amount'] = '0'
+            conv.context['total'] = subtotal
+            conv.step = 'confirm'
+            conv.save()
+            summary = ""
+            for i, item in enumerate(items, 1):
+                qty = item.get('quantity', 1)
+                summary += f"*Item {i}:* Size {item['size']} | {item['material']} | {item['color']} | Qty: {qty} | ₦{item['price']} each\n"
+            return send_message(phone,
+                f"📋 *Order Summary:*\n\n"
+                f"{summary}\n"
+                f"Delivery: {ctx['location']} — ₦{ctx['delivery_fee']}\n"
+                f"Address: {ctx['address']}\n"
+                f"💳 *TOTAL: ₦{subtotal}*\n\n"
+                "Reply *YES* to confirm ✅\n"
+                "Reply *NO* to cancel ❌\n"
+                "Reply *EDIT* to change details"
+            )
+
+        # Validate code
+        code, message = validate_discount(msg.strip(), customer)
+        if not code:
+            return send_message(phone,
+                f"❌ {message}\n\n"
+                "Try another code or reply *SKIP* to continue."
+            )
+
+        # Apply discount on product only (not delivery fee)
+        try:
+            delivery_fee = float(ctx.get('delivery_fee', '0').replace(',', ''))
+            raw_subtotal = float(subtotal.replace(',', '')) - delivery_fee
+            discount_amount = raw_subtotal * code.percentage / 100
+            discounted_total = raw_subtotal - discount_amount + delivery_fee
+            discount_str = f"{discount_amount:,.2f}"
+            total_str = f"{discounted_total:,.2f}"
+        except:
+            discount_str = '0'
+            total_str = subtotal
+
+        conv.context['discount_code'] = code.code
+        conv.context['discount_amount'] = discount_str
+        conv.context['total'] = total_str
+        conv.step = 'confirm'
+        conv.save()
+
+        summary = ""
+        for i, item in enumerate(items, 1):
+            qty = item.get('quantity', 1)
+            summary += f"*Item {i}:* Size {item['size']} | {item['material']} | {item['color']} | Qty: {qty} | ₦{item['price']} each\n"
+
+        return send_message(phone,
+            f"🎉 *Discount applied!* -{code.percentage}% off\n\n"
+            f"📋 *Order Summary:*\n\n"
+            f"{summary}\n"
+            f"Delivery: {ctx['location']} — ₦{ctx['delivery_fee']}\n"
+            f"Address: {ctx['address']}\n"
+            f"Subtotal: ₦{subtotal}\n"
+            f"Discount ({code.code}): -₦{discount_str}\n"
+            f"💳 *TOTAL: ₦{total_str}*\n\n"
+            "Reply *YES* to confirm ✅\n"
+            "Reply *NO* to cancel ❌\n"
+            "Reply *EDIT* to change details"
+        )
 
     # EDIT
     elif step == 'confirm' and msg_lower == 'edit':
@@ -438,6 +515,8 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             customer.tag = 'customer'
             customer.save()
             order_ids = []
+            discount_code_str = ctx.get('discount_code', '')
+            discount_amount = ctx.get('discount_amount', '0')
             for item in items:
                 order = Order.objects.create(
                     customer=customer,
@@ -449,9 +528,20 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
                     address=ctx.get('address', ''),
                     status='pending',
                     image_url=item.get('image_url', ''),
-                    notes=f"Image: {item.get('image_id','N/A')} | {ctx.get('location','')} | Fee: {ctx.get('delivery_fee','')}"
+                    notes=f"Image: {item.get('image_id','N/A')} | {ctx.get('location','')} | Fee: {ctx.get('delivery_fee','')} | Discount: {discount_code_str} -₦{discount_amount}"
                 )
                 order_ids.append(str(order.id))
+            # Record discount usage
+            if discount_code_str:
+                try:
+                    code_obj = DiscountCode.objects.get(code=discount_code_str)
+                    DiscountUsage.objects.create(
+                        customer=customer,
+                        code=code_obj,
+                        order_id=int(order_ids[0]) if order_ids else 0
+                    )
+                except:
+                    pass
             conv.step = 'start'
             conv.context = {}
             conv.save()

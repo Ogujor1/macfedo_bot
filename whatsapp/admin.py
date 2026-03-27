@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.utils.html import format_html
 import requests
 from django.conf import settings
-from .models import Customer, Order, Conversation, Broadcast, MessageLog
+from .models import Customer, Order, Conversation, Broadcast, MessageLog, DiscountCode, DiscountUsage
 import time
 
 def send_template_message(phone, template_name, customer_name, product="", price=""):
@@ -153,3 +153,19 @@ class BroadcastAdmin(admin.ModelAdmin):
             'has_permission': True,
         }
         return render(request, 'admin/send_broadcast.html', context)
+
+
+@admin.register(DiscountCode)
+class DiscountCodeAdmin(admin.ModelAdmin):
+    list_display = ['code', 'percentage', 'expiry_date', 'max_uses_per_customer', 'is_active', 'total_uses']
+    list_editable = ['is_active']
+
+    def total_uses(self, obj):
+        return DiscountUsage.objects.filter(code=obj).count()
+    total_uses.short_description = 'Total Uses'
+
+@admin.register(DiscountUsage)
+class DiscountUsageAdmin(admin.ModelAdmin):
+    list_display = ['customer', 'code', 'order_id', 'used_at']
+    search_fields = ['customer__name', 'code__code']
+    list_filter = ['code']

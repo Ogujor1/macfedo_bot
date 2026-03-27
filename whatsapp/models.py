@@ -9,6 +9,8 @@ class Customer(models.Model):
     date_added = models.DateTimeField(auto_now_add=True)
     is_active = models.BooleanField(default=True)
 
+    last_interaction = models.DateTimeField(null=True, blank=True)
+
     def __str__(self):
         return f"{self.name} - {self.phone}"
 
@@ -79,3 +81,24 @@ class MessageLog(models.Model):
 
     def __str__(self):
         return f"{self.customer.name} - {self.status} - {self.sent_at.strftime('%d %b %Y')}"
+
+
+class DiscountCode(models.Model):
+    code = models.CharField(max_length=50, unique=True)
+    percentage = models.IntegerField(default=10)
+    expiry_date = models.DateField()
+    max_uses_per_customer = models.IntegerField(default=3)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.code} - {self.percentage}% off"
+
+class DiscountUsage(models.Model):
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE)
+    code = models.ForeignKey(DiscountCode, on_delete=models.CASCADE)
+    used_at = models.DateTimeField(auto_now_add=True)
+    order_id = models.IntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.customer.name} used {self.code.code} on {self.used_at.strftime('%d %b %Y')}"
