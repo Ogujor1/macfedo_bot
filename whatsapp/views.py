@@ -6,6 +6,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.utils import timezone
 from .models import Customer, Order, Conversation, MessageLog
+from .utils import download_and_save_image
+from django.conf import settings as django_settings
 
 CATALOGUE_LINK = "https://drive.google.com/drive/folders/1FyE3JkmnMxduMJ9AmBXIGMOwaxfqVqcR"
 SHOP_LINK = "https://macfedowears.com/shop"
@@ -41,9 +43,16 @@ def get_price(size):
     else:
         return "43,999.99"
 
-def calc_total(price, fee):
+def calc_total(price, fee, quantity=1):
     try:
-        return f"{float(price.replace(',','')) + float(fee.replace(',',''))  :,.2f}"
+        return f"{(float(price.replace(',','')) * quantity) + float(fee.replace(',',''))  :,.2f}"
+    except:
+        return "0.00"
+
+def calc_items_total(items, delivery_fee):
+    try:
+        subtotal = sum(float(i['price'].replace(',','')) * int(i.get('quantity', 1)) for i in items)
+        return f"{subtotal + float(delivery_fee.replace(',',''))  :,.2f}"
     except:
         return "0.00"
 
@@ -83,7 +92,6 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
     msg = message.strip() if msg_type == 'text' else ''
     msg_lower = msg.lower()
 
-    # Get or create customer
     customer, created = Customer.objects.get_or_create(
         phone=phone,
         defaults={'name': phone, 'phone': phone, 'tag': 'unknown'}
@@ -92,7 +100,7 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
     conv, _ = Conversation.objects.get_or_create(customer=customer)
     step = conv.step
 
-    # GLOBAL COMMANDS - always available
+    # GLOBAL COMMANDS
     if msg_type == 'text':
         if msg_lower == '00':
             conv.step = 'start'
@@ -131,9 +139,7 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
                 "To resubscribe just send Hi again."
             )
 
-        # Hi always resubscribes and welcomes
         if msg_lower in ['hi', 'hello', 'hey', 'start', '0']:
-            # Resubscribe if unsubscribed
             if customer.tag == 'unsubscribed' or not customer.is_active:
                 customer.tag = 'customer'
                 customer.is_active = True
@@ -141,7 +147,6 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             conv.step = 'waiting_image'
             conv.context = {}
             conv.save()
-            # Ask for name if new customer
             if created or customer.name == phone:
                 conv.step = 'get_name'
                 conv.save()
@@ -174,24 +179,33 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
 
     # IMAGE RECEIVED
     if msg_type == 'image':
-        # Check if this is a payment proof (customer has pending order)
-        pending_orders = Order.objects.filter(customer=customer, status='pending').order_by('-date_ordered')
+        # Check if payment proof (pending order exists and step is start)
+        pending_orders = Order.objects.filter(
+            customer=customer, status='pending'
+        ).order_by('-date_ordered')
+
         if step == 'start' and pending_orders.exists():
-            # Save payment proof to most recent pending order
             order = pending_orders.first()
-            order.notes = order.notes + f" | Payment proof: {image_url}"
+            local_url = download_and_save_image(image_id, settings.WHATSAPP_TOKEN, 'payment_proofs')
+            payment_url = local_url or ''
+            order.notes = (order.notes or '') + f" | Payment: {payment_url}"
+            order.image_url = order.image_url  # keep product image
             order.status = 'confirmed'
             order.save()
+            # Save payment proof URL in notes for admin display
+            print(f"Payment proof saved: {payment_url}")
             return send_message(phone,
                 "✅ *Payment proof received!*\n\n"
-                f"Order #{order.id} is now being processed.\n\n"
+                f"Order #{order.id} is now confirmed.\n\n"
                 "🕒 Our team will verify and process within *1 hour*.\n\n"
                 "We'll notify you once your order is on its way! 🚚\n\n"
                 "_Type *Hi* to place another order_"
             )
 
+        # Download and save order image
+        local_url = download_and_save_image(image_id, settings.WHATSAPP_TOKEN, 'order_images')
         conv.context['image_id'] = image_id or 'received'
-        conv.context['image_url'] = image_url or ''
+        conv.context['image_url'] = local_url or image_url or ''
         conv.step = 'get_size'
         conv.save()
         name = customer.name if customer.name != phone else ''
@@ -226,10 +240,36 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
         price = get_price(size)
         conv.context['size'] = size
         conv.context['price'] = price
+        conv.step = 'get_quantity'
+        conv.save()
+        return send_message(phone,
+            f"Size *{size}* ✅  |  Price: *₦{price}* each\n\n"
+            "How many pairs do you want?\n"
+            "_(Enter a number e.g. 1, 2, 3)_\n\n"
+            "_Max 4 pairs per order. For 5+ reply *AGENT*_"
+        )
+
+    # GET QUANTITY
+    elif step == 'get_quantity':
+        qty_match = re.search(r'\b([1-9])\b', msg)
+        if not qty_match:
+            return send_message(phone, "Please enter a number between 1 and 9.")
+        qty = int(qty_match.group())
+        if qty > 4:
+            return send_message(phone,
+                f"For {qty}+ pairs, our agent will assist you:\n\n"
+                f"📱 WhatsApp: {AGENT_PHONE}\n"
+                "Hours: 9am - 8pm daily\n\n"
+                "Or reply with 1-4 to order via bot."
+            )
+        price = conv.context.get('price', '38,999.99')
+        subtotal = f"{float(price.replace(',','')) * qty:,.2f}"
+        conv.context['quantity'] = qty
+        conv.context['subtotal'] = subtotal
         conv.step = 'get_material'
         conv.save()
         return send_message(phone,
-            f"Size *{size}* ✅  |  Price: *₦{price}*\n\n"
+            f"*{qty} pair(s)* ✅  |  Subtotal: *₦{subtotal}*\n\n"
             "What *material* do you prefer?\n\n"
             "1️⃣ Leather\n"
             "2️⃣ Suede\n"
@@ -300,12 +340,12 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
     # GET ADDRESS
     elif step == 'get_address':
         conv.context['address'] = msg.strip()
-        # Save first item to items list
         items = conv.context.get('items', [])
         items.append({
             'image_id': conv.context.get('image_id', 'N/A'),
             'image_url': conv.context.get('image_url', ''),
             'size': conv.context.get('size', ''),
+            'quantity': conv.context.get('quantity', 1),
             'material': conv.context.get('material', ''),
             'color': conv.context.get('color', ''),
             'price': conv.context.get('price', ''),
@@ -323,24 +363,24 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             "_Reply *0* to restart_"
         )
 
-    # ADD MORE ITEMS
+    # ADD MORE
     elif step == 'add_more':
         if msg_lower == '1':
             items = conv.context.get('items', [])
             if len(items) >= 4:
                 return send_message(phone,
-                    f"You already have *{len(items)} pairs* in your cart.\n\n"
-                    "For 5+ pairs, our agent will assist you personally:\n\n"
-                    f"📱 WhatsApp: {AGENT_PHONE}\n"
-                    "Hours: 9am - 8pm daily\n\n"
-                    "Or reply *2* to proceed with your current order."
+                    f"You have *{len(items)} pairs* in your cart.\n\n"
+                    "For 5+ pairs contact our agent:\n\n"
+                    f"📱 WhatsApp: {AGENT_PHONE}\n\n"
+                    "Or reply *2* to proceed with current order."
                 )
             conv.step = 'get_size'
-            conv.context['image_id'] = 'new_item'
+            conv.context['image_id'] = ''
+            conv.context['image_url'] = ''
             conv.save()
             return send_message(phone,
                 f"Adding item {len(items) + 1}! 👟\n\n"
-                "📸 Send an image of the next pair you want.\n\n"
+                "📸 Send an image of the next pair.\n\n"
                 f"Browse: {CATALOGUE_LINK}"
             )
         elif msg_lower == '2':
@@ -348,16 +388,13 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             conv.save()
             ctx = conv.context
             items = ctx.get('items', [])
-            # Calculate subtotal
-            subtotal = sum(float(i['price'].replace(',','')) for i in items)
-            fee = float(ctx.get('delivery_fee', '0').replace(',',''))
-            total = f"{subtotal + fee:,.2f}"
+            total = calc_items_total(items, ctx.get('delivery_fee', '0'))
             conv.context['total'] = total
             conv.save()
-            # Build items summary
             summary = ""
             for i, item in enumerate(items, 1):
-                summary += f"*Item {i}:* Size {item['size']} | {item['material']} | {item['color']} | ₦{item['price']}\n"
+                qty = item.get('quantity', 1)
+                summary += f"*Item {i}:* Size {item['size']} | {item['material']} | {item['color']} | Qty: {qty} | ₦{item['price']} each\n"
             return send_message(phone,
                 f"📋 *Order Summary:*\n\n"
                 f"{summary}\n"
@@ -373,15 +410,14 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             conv.context = {}
             conv.save()
             return send_message(phone,
-                "👤 *For 5+ pairs, our agent will assist you:*\n\n"
+                "👤 *For 5+ pairs:*\n\n"
                 f"📱 WhatsApp: {AGENT_PHONE}\n"
                 "Hours: 9am - 8pm daily\n\n"
-                "Our team responds within minutes!\n\n"
                 "Type *Hi* to return to bot anytime."
             )
         else:
             return send_message(phone,
-                "Please reply:\n1 to add another pair\n2 to proceed to payment\n3 for 5+ pairs"
+                "Please reply:\n1 to add another pair\n2 to proceed\n3 for 5+ pairs"
             )
 
     # EDIT
@@ -389,7 +425,7 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
         conv.step = 'get_size'
         conv.save()
         return send_message(phone,
-            "No problem! Let's update your order.\n\n"
+            "Let's update your order.\n\n"
             "What *size* do you need?\n"
             "_(e.g. 36, 38, 40, 42, 44, 46)_"
         )
@@ -409,6 +445,7 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
                     material=item.get('material', '').lower(),
                     size=item.get('size', ''),
                     color=item.get('color', ''),
+                    quantity=item.get('quantity', 1),
                     address=ctx.get('address', ''),
                     status='pending',
                     image_url=item.get('image_url', ''),
@@ -422,7 +459,8 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
             ids = ', '.join([f'#{i}' for i in order_ids])
             summary = ""
             for i, item in enumerate(items, 1):
-                summary += f"Item {i}: Size {item['size']} | {item['material']} | {item['color']}\n"
+                qty = item.get('quantity', 1)
+                summary += f"Item {i}: Size {item['size']} | {item['material']} | {item['color']} | Qty: {qty}\n"
             return send_message(phone,
                 f"✅ *Order Confirmed!*\n\n"
                 f"Order ID(s): *{ids}*\n\n"
@@ -436,7 +474,7 @@ def process_message(phone, message, msg_type='text', image_id=None, image_url=''
                 f"Account: 8906621694\n"
                 f"Name: Michael Ogujor\n"
                 f"Amount: ₦{ctx['total']}\n\n"
-                f"📸 *Send payment proof here after transfer*\n\n"
+                f"📸 *Send payment screenshot here after transfer*\n\n"
                 f"🕒 We process within 1hr of payment!\n\n"
                 f"Thank you{' ' + name if name else ''}! 🙏👟\n\n"
                 f"_Type *Hi* to place another order_"
@@ -482,7 +520,6 @@ def webhook(request):
                 phone = msg_data['from']
                 msg_type = msg_data['type']
 
-                # Auto-capture name from WhatsApp profile
                 if 'contacts' in value:
                     contact = value['contacts'][0]
                     wa_name = contact.get('profile', {}).get('name', '')
@@ -498,19 +535,8 @@ def webhook(request):
                 if msg_type == 'text':
                     process_message(phone, msg_data['text']['body'], 'text')
                 elif msg_type == 'image':
-                    image_data = msg_data.get('image', {})
-                    image_id = image_data.get('id', '')
-                    # Fetch actual image URL from Meta API
-                    try:
-                        img_response = requests.get(
-                            f"https://graph.facebook.com/v18.0/{image_id}",
-                            headers={"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"}
-                        )
-                        img_json = img_response.json()
-                        image_url = img_json.get('url', '')
-                    except:
-                        image_url = ''
-                    process_message(phone, '', 'image', image_id, image_url)
+                    image_id = msg_data.get('image', {}).get('id', '')
+                    process_message(phone, '', 'image', image_id)
 
             if 'statuses' in value:
                 for status_data in value['statuses']:

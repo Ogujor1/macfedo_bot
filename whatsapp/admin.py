@@ -52,15 +52,17 @@ class OrderAdmin(admin.ModelAdmin):
 
     def show_payment_proof(self, obj):
         notes = obj.notes or ''
-        if 'Payment proof:' in notes:
-            url = notes.split('Payment proof:')[1].strip().split('|')[0].strip()
-            if url:
+        if '| Payment:' in notes:
+            url = notes.split('| Payment:')[1].strip().split('|')[0].strip()
+            if url and url.startswith('http'):
                 return format_html(
                     '<a href="{}" target="_blank">'
                     '<img src="{}" style="width:80px;height:80px;object-fit:cover;border-radius:4px;border:2px solid green;" />'
                     '</a>', url, url
                 )
-        return "⏳ Awaiting"
+        if obj.status == 'confirmed':
+            return '✅ Confirmed'
+        return '⏳ Awaiting'
     show_payment_proof.short_description = 'Payment Proof'
 
     def show_image(self, obj):
