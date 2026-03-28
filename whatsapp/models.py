@@ -102,3 +102,16 @@ class DiscountUsage(models.Model):
 
     def __str__(self):
         return f"{self.customer.name} used {self.code.code} on {self.used_at.strftime('%d %b %Y')}"
+
+
+class MessageTemplate(models.Model):
+    name = models.CharField(max_length=100, unique=True)
+    description = models.CharField(max_length=255)
+    body = models.TextField()
+    variables = models.CharField(max_length=255, help_text="e.g. name, product, price")
+    num_variables = models.IntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.num_variables} var(s))"

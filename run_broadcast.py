@@ -49,6 +49,7 @@ parser.add_argument('--product', default='')
 parser.add_argument('--price', default='')
 parser.add_argument('--title', default='Broadcast')
 parser.add_argument('--tag', default='all')
+parser.add_argument('--image_url', default='')
 args = parser.parse_args()
 
 if args.tag == 'all':

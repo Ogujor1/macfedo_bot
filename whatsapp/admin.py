@@ -6,7 +6,7 @@ from django.contrib import messages
 from django.utils.html import format_html
 import requests
 from django.conf import settings
-from .models import Customer, Order, Conversation, Broadcast, MessageLog, DiscountCode, DiscountUsage
+from .models import Customer, Order, Conversation, Broadcast, MessageLog, DiscountCode, DiscountUsage, MessageTemplate
 import time
 
 def send_template_message(phone, template_name, customer_name, product="", price=""):
@@ -112,20 +112,60 @@ class BroadcastAdmin(admin.ModelAdmin):
             tag_filter = request.POST.get('tag_filter', 'all')
             title = request.POST.get('title', 'Broadcast')
 
+            # Get num_variables from template
+            try:
+                tmpl = MessageTemplate.objects.get(name=template_name)
+                num_vars = tmpl.num_variables
+            except:
+                num_vars = 1
+
+            image_url = request.POST.get('image_url', '').strip()
+
             if tag_filter == 'all':
-                customers = Customer.objects.filter(is_active=True)
+                customers = Customer.objects.filter(is_active=True).exclude(tag='unreachable')
+            elif tag_filter == 'unsubscribed':
+                customers = Customer.objects.filter(tag='unsubscribed')
             else:
-                customers = Customer.objects.filter(is_active=True, tag=tag_filter)
+                customers = Customer.objects.filter(is_active=True, tag=tag_filter).exclude(tag='unreachable')
 
             sent = 0
             failed = 0
 
+            import requests as req
             for customer in customers:
                 name = customer.name if customer.name != customer.phone else 'Customer'
-                success = send_template_message(
-                    customer.phone, template_name, name, product, price
-                )
-                if success:
+                # Build parameters based on num_variables
+                parameters = [{"type": "text", "text": name}]
+                if num_vars >= 2 and product:
+                    parameters.append({"type": "text", "text": product})
+                if num_vars >= 3 and price:
+                    parameters.append({"type": "text", "text": price})
+
+                # Build components
+                components = [{"type": "body", "parameters": parameters}]
+                if image_url:
+                    components.insert(0, {
+                        "type": "header",
+                        "parameters": [{"type": "image", "image": {"link": image_url}}]
+                    })
+
+                api_url = f"https://graph.facebook.com/v18.0/{settings.PHONE_NUMBER_ID}/messages"
+                headers = {
+                    "Authorization": f"Bearer {settings.WHATSAPP_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "messaging_product": "whatsapp",
+                    "to": customer.phone,
+                    "type": "template",
+                    "template": {
+                        "name": template_name,
+                        "language": {"code": "en"},
+                        "components": components
+                    }
+                }
+                r = req.post(url=api_url, headers=headers, json=data)
+                if r.status_code == 200:
                     sent += 1
                 else:
                     failed += 1
@@ -140,15 +180,17 @@ class BroadcastAdmin(admin.ModelAdmin):
 
             self.message_user(
                 request,
-                f"Broadcast complete! Sent: {sent} | Failed: {failed}",
+                f"Broadcast complete! ✅ Sent: {sent} | ❌ Failed: {failed}",
                 messages.SUCCESS
             )
             return HttpResponseRedirect('../')
 
-        customers_count = Customer.objects.filter(is_active=True).count()
+        customers_count = Customer.objects.filter(is_active=True).exclude(tag='unreachable').count()
+        templates = MessageTemplate.objects.filter(is_active=True)
         context = {
             'title': 'Send Broadcast',
             'customers_count': customers_count,
+            'templates': templates,
             'opts': self.model._meta,
             'has_permission': True,
         }
@@ -169,3 +211,11 @@ class DiscountUsageAdmin(admin.ModelAdmin):
     list_display = ['customer', 'code', 'order_id', 'used_at']
     search_fields = ['customer__name', 'code__code']
     list_filter = ['code']
+
+
+@admin.register(MessageTemplate)
+class MessageTemplateAdmin(admin.ModelAdmin):
+    list_display = ['name', 'description', 'num_variables', 'variables', 'is_active']
+    list_editable = ['is_active']
+    search_fields = ['name', 'description']
+    readonly_fields = ['created_at']
