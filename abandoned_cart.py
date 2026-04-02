@@ -1,131 +1,129 @@
+#!/usr/bin/env python3
+"""
+Macfedo Bot — Abandoned Cart Checker
+=====================================
+Runs every 2 hours via cron. Detects customers who dropped off
+mid-order and sends an instant alert to the agent.
+
+SETUP (run once in PuTTY):
+  crontab -e
+
+Add this line:
+  0 */2 * * * /home/macfedo_bot/venv/bin/python /home/macfedo_bot/abandoned_cart.py >> /home/macfedo_bot/abandoned.log 2>&1
+
+Test manually:
+  cd /home/macfedo_bot
+  source venv/bin/activate
+  python abandoned_cart.py
+"""
+
 import os
 import sys
 import django
-import time
+import requests
+from datetime import timedelta
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'macfedo.settings')
-sys.path.insert(0, '/home/macfedo_bot')
+sys.path.insert(0, "/home/macfedo_bot")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "macfedo_bot.settings")
 django.setup()
 
-import requests
-from django.conf import settings
 from django.utils import timezone
-from datetime import timedelta
-from whatsapp.models import Customer, Conversation, Order
+from whatsapp.models import Customer, Conversation
 
-def send_message(phone, message):
-    url = f"https://graph.facebook.com/v18.0/{settings.PHONE_NUMBER_ID}/messages"
+AGENT_NUMBER    = "2348035796380"
+WHATSAPP_TOKEN  = os.environ.get("WHATSAPP_TOKEN", "")
+PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID", "")
+
+STEP_LABELS = {
+    "await_catalogue_choice": "Viewing catalogue",
+    "await_order_image":      "Choosing style",
+    "await_size":             "Selecting size",
+    "await_quantity":         "Selecting quantity",
+    "await_material":         "Selecting material",
+    "await_color":            "Selecting color",
+    "await_delivery":         "Selecting delivery zone",
+    "await_address":          "Providing address",
+    "await_discount":         "Discount code step",
+    "await_confirmation":     "Reviewing order summary",
+    "await_payment":          "Awaiting payment proof",
+}
+
+ABANDONED_STEPS = list(STEP_LABELS.keys())
+
+
+def send_whatsapp(to, message):
+    url = f"https://graph.facebook.com/v18.0/{PHONE_NUMBER_ID}/messages"
     headers = {
-        "Authorization": f"Bearer {settings.WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
     }
-    data = {
+    payload = {
         "messaging_product": "whatsapp",
-        "to": phone,
+        "to": to,
         "type": "text",
-        "text": {"body": message}
+        "text": {"body": message, "preview_url": False},
     }
-    r = requests.post(url, headers=headers, json=data)
-    return r.status_code == 200
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        resp.raise_for_status()
+        print(f"Alert sent to agent for customer {to}")
+    except Exception as e:
+        print(f"Failed to send alert: {e}")
 
-def send_template(phone, template_name, name):
-    url = f"https://graph.facebook.com/v18.0/{settings.PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {settings.WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": phone,
-        "type": "template",
-        "template": {
-            "name": template_name,
-            "language": {"code": "en"},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [{"type": "text", "text": name}]
-                }
-            ]
-        }
-    }
-    r = requests.post(url, headers=headers, json=data)
-    return r.status_code == 200
 
-now = timezone.now()
-two_hours_ago = now - timedelta(hours=2)
-twenty_four_hours_ago = now - timedelta(hours=24)
+def check_abandoned():
+    now         = timezone.now()
+    two_hrs_ago = now - timedelta(hours=2)
+    one_day_ago = now - timedelta(hours=24)
 
-# Find abandoned carts — customers who:
-# 1. Interacted with bot in last 24hrs
-# 2. Have an incomplete conversation (not at start)
-# 3. Have NO confirmed/pending order in last 24hrs
-# 4. Are active customers
+    abandoned = Conversation.objects.filter(
+        step__in=ABANDONED_STEPS,
+        last_updated__lte=two_hrs_ago,
+        last_updated__gte=one_day_ago,
+        customer__is_active=True,
+    ).select_related("customer")
 
-abandoned = []
+    if not abandoned.exists():
+        print("No abandoned carts found.")
+        return
 
-conversations = Conversation.objects.filter(
-    customer__is_active=True,
-    customer__last_interaction__gte=twenty_four_hours_ago,
-    customer__last_interaction__lte=two_hours_ago,
-).exclude(
-    step='start'
-).exclude(
-    step='waiting_image'
-).select_related('customer')
+    count = abandoned.count()
+    print(f"Found {count} abandoned cart(s). Sending alerts...")
 
-for conv in conversations:
-    customer = conv.customer
-    # Skip if customer has a recent confirmed order
-    recent_order = Order.objects.filter(
-        customer=customer,
-        status__in=['confirmed', 'shipped', 'delivered'],
-        date_ordered__gte=twenty_four_hours_ago
-    ).exists()
-    if recent_order:
-        continue
-    # Skip if customer has sent payment proof (pending but recently updated)
-    recent_pending = Order.objects.filter(
-        customer=customer,
-        status='pending',
-        date_ordered__gte=two_hours_ago
-    ).exists()
-    if recent_pending:
-        continue
-    abandoned.append((customer, conv))
+    for conv in abandoned:
+        customer = conv.customer
+        ctx      = conv.context or {}
+        name     = customer.name or "Unknown"
+        step     = STEP_LABELS.get(conv.step, conv.step)
+        size     = ctx.get("size", "Not provided")
+        color    = ctx.get("color", "Not provided")
+        material = ctx.get("material", "Not provided")
+        qty      = ctx.get("quantity", "Not provided")
+        last_seen = conv.last_updated.strftime("%d %b %Y, %I:%M %p")
 
-print(f"Found {len(abandoned)} abandoned carts")
+        msg = (
+            f"UNSUCCESSFUL ORDER ALERT\n\n"
+            f"Name: {name}\n"
+            f"Number: +{customer.phone}\n"
+            f"Dropped off at: {step}\n"
+            f"Last active: {last_seen}\n\n"
+            f"ORDER DETAILS SO FAR\n"
+            f"Size: {size}\n"
+            f"Color: {color}\n"
+            f"Material: {material}\n"
+            f"Quantity: {qty}\n\n"
+            f"Follow up: wa.me/{customer.phone}"
+        )
 
-sent = 0
-for customer, conv in abandoned:
-    name = customer.name if customer.name != customer.phone else 'there'
-    step = conv.step
+        send_whatsapp(AGENT_NUMBER, msg)
 
-    # Customize message based on where they dropped off
-    if step in ['get_size', 'get_quantity', 'get_material', 'get_color']:
-        stage = "selecting your product details"
-    elif step in ['get_delivery', 'get_address']:
-        stage = "entering your delivery details"
-    elif step in ['add_more', 'confirm', 'get_discount']:
-        stage = "completing your order"
-    else:
-        stage = "placing your order"
-
-    success = send_template(
-        customer.phone,
-        'macfedo_new_ordering_line',
-        name
-    )
-
-    if success:
-        sent += 1
-        print(f"✅ Sent to {customer.name} (abandoned at: {step})")
-        # Reset conversation so they start fresh
-        conv.step = 'start'
+        # Reset conversation so customer can start fresh if they return
+        conv.step    = "start"
         conv.context = {}
         conv.save()
-    else:
-        print(f"❌ Failed for {customer.phone}")
-    time.sleep(0.5)
 
-print(f"\nDone! Sent {sent} abandoned cart reminders")
+    print(f"Done. {count} alert(s) sent to agent.")
+
+
+if __name__ == "__main__":
+    check_abandoned()

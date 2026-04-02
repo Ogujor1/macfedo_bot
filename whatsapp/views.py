@@ -694,6 +694,9 @@ def _step_confirmation(from_num, customer, conv, user_text):
         customer.tag = "customer"
         customer.save(update_fields=["tag"])
 
+        # Notify agent of new confirmed order
+        _notify_agent_order_confirmed(customer, ctx, order.id)
+
         conv.step = "await_payment"
         conv.context["order_id"] = order.id
         conv.save()
@@ -805,15 +808,89 @@ def _notify_agent_new_lead(customer):
     _send_text(AGENT_NUMBER, msg)
 
 
-def _notify_agent_payment(customer, context):
-    total = context.get("total", 0)
+def _notify_agent_order_confirmed(customer, ctx, order_id):
+    """Notify agent the moment a customer confirms their order (before payment)."""
+    size     = ctx.get("size", "-")
+    color    = ctx.get("color", "-")
+    material = ctx.get("material", "-")
+    qty      = ctx.get("quantity", "-")
+    address  = ctx.get("address", "-")
+    zone     = ctx.get("delivery_zone", "-")
+    total    = ctx.get("total", 0)
+    discount = ctx.get("discount_code") or "None"
+
     msg = (
-        f"PAYMENT RECEIVED\n\n"
-        f"{customer.name} (+{customer.phone})\n"
-        f"Amount: {total:,.0f}\n"
+        f"NEW ORDER PLACED (Awaiting Payment)\n\n"
+        f"Order ID: #{order_id}\n"
+        f"Name: {customer.name}\n"
+        f"Number: +{customer.phone}\n"
         f"Time: {timezone.now().strftime('%d %b %Y, %I:%M %p')}\n\n"
-        f"Check admin panel to confirm.\n"
-        f"wa.me/{customer.phone}"
+        f"ORDER DETAILS\n"
+        f"Size: {size}\n"
+        f"Color: {color}\n"
+        f"Material: {material}\n"
+        f"Quantity: {qty} pair(s)\n"
+        f"Delivery Zone: {zone}\n"
+        f"Discount Code: {discount}\n"
+        f"TOTAL: {total:,.0f}\n\n"
+        f"Address: {address}\n\n"
+        f"Chat: wa.me/{customer.phone}"
+    )
+    _send_text(AGENT_NUMBER, msg)
+
+
+def _notify_agent_payment(customer, context):
+    total    = context.get("total", 0)
+    size     = context.get("size", "-")
+    color    = context.get("color", "-")
+    material = context.get("material", "-")
+    qty      = context.get("quantity", "-")
+    address  = context.get("address", "-")
+    zone     = context.get("delivery_zone", "-")
+    fee      = context.get("delivery_fee", 0)
+    discount = context.get("discount_code") or "None"
+
+    msg = (
+        f"SUCCESSFUL ORDER\n\n"
+        f"Name: {customer.name}\n"
+        f"Number: +{customer.phone}\n"
+        f"Time: {timezone.now().strftime('%d %b %Y, %I:%M %p')}\n\n"
+        f"ORDER DETAILS\n"
+        f"Size: {size}\n"
+        f"Color: {color}\n"
+        f"Material: {material}\n"
+        f"Quantity: {qty} pair(s)\n"
+        f"Delivery Zone: {zone}\n"
+        f"Delivery Fee: {fee:,}\n"
+        f"Discount Code: {discount}\n"
+        f"TOTAL PAID: {total:,.0f}\n\n"
+        f"Address: {address}\n\n"
+        f"Chat: wa.me/{customer.phone}"
+    )
+    _send_text(AGENT_NUMBER, msg)
+
+
+def _notify_agent_abandoned(customer, context):
+    """Called when a customer drops off mid-order."""
+    name    = customer.name or "Unknown"
+    step    = context.get("last_step", "unknown")
+    size    = context.get("size", "Not provided")
+    color   = context.get("color", "Not provided")
+    material= context.get("material", "Not provided")
+    qty     = context.get("quantity", "Not provided")
+
+    msg = (
+        f"ABANDONED ORDER\n\n"
+        f"Name: {name}\n"
+        f"Number: +{customer.phone}\n"
+        f"Dropped off at: {step}\n"
+        f"Time: {timezone.now().strftime('%d %b %Y, %I:%M %p')}\n\n"
+        f"ORDER DETAILS SO FAR\n"
+        f"Size: {size}\n"
+        f"Color: {color}\n"
+        f"Material: {material}\n"
+        f"Quantity: {qty}\n\n"
+        f"Follow up: wa.me/{customer.phone}"
     )
     _send_text(AGENT_NUMBER, msg)
 
