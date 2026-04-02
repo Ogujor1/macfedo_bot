@@ -100,12 +100,16 @@ def _process_webhook(data):
 
     if msg_type == "text":
         user_text = message["text"]["body"].strip()
+        image_id  = None
     elif msg_type == "image":
         user_text = "__IMAGE__"
+        image_id  = message.get("image", {}).get("id")
     elif msg_type == "button":
         user_text = message["button"]["payload"].strip()
+        image_id  = None
     elif msg_type == "interactive":
         interactive = message.get("interactive", {})
+        image_id    = None
         if interactive.get("type") == "button_reply":
             user_text = interactive["button_reply"]["id"].strip()
         elif interactive.get("type") == "list_reply":
@@ -114,6 +118,7 @@ def _process_webhook(data):
             user_text = ""
     else:
         user_text = ""
+        image_id  = None
 
     customer, created = Customer.objects.get_or_create(
         phone=from_num,
@@ -166,6 +171,11 @@ def _process_webhook(data):
             customer.save()
         conv.step = "start"
         conv.context = {}
+        conv.save()
+
+    # Save product image ID to context if customer sent an image
+    if image_id and conv.step in ["await_order_image", "await_catalogue_choice"]:
+        conv.context["product_image_id"] = image_id
         conv.save()
 
     _handle_step(from_num, customer, conv, user_text)
@@ -704,9 +714,9 @@ def _step_confirmation(from_num, customer, conv, user_text):
         _send_text(from_num,
             "Order confirmed! Thank you 🎉\n\n"
             "*Payment Details:*\n"
-            "Bank: *GTBank*\n"
+            "Bank: *Palmpay*\n"
             "Account Name: *Michael Ogujor*\n"
-            "Account Number: *XXXXXXXXXX*\n\n"
+            "Account Number: *8906621694*\n\n"
             f"Amount: *₦{ctx.get('total', 0):,.0f}*\n\n"
             "After payment, please send a *screenshot of your receipt* here. 📸\n\n"
             "_Need help? Reply *AGENT* to speak with our team._"
@@ -849,6 +859,11 @@ def _notify_agent_payment(customer, context):
     zone     = context.get("delivery_zone", "-")
     fee      = context.get("delivery_fee", 0)
     discount = context.get("discount_code") or "None"
+    image_id = context.get("product_image_id")
+
+    # Send product image to agent first if available
+    if image_id:
+        _send_image_by_id(AGENT_NUMBER, image_id, "Product requested by customer")
 
     msg = (
         f"SUCCESSFUL ORDER\n\n"
@@ -957,6 +972,17 @@ def _send_image(to, image_url, caption=""):
         "to": to,
         "type": "image",
         "image": {"link": image_url, "caption": caption},
+    }
+    return _call_api(payload)
+
+
+def _send_image_by_id(to, image_id, caption=""):
+    """Send an image using its WhatsApp media ID (for forwarding customer images)."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"id": image_id, "caption": caption},
     }
     return _call_api(payload)
 
